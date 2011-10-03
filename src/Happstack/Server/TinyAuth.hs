@@ -3,7 +3,7 @@
 {-| A simple framework for doing forms-based
 authenitcation in Happstack.
 -}
-module Auth
+module Happstack.Server.TinyAuth
     (
     -- * Required state
       AuthMonad(..)
@@ -29,6 +29,7 @@ import qualified Data.ByteString.Char8 as B8
 import Data.Data (Data)
 import Data.Functor
 import Data.Maybe (fromMaybe)
+import Data.Proxy (Proxy, asProxyTypeOf)
 import Data.SafeCopy (base, deriveSafeCopy, SafeCopy, safePut, safeGet)
 import Data.Serialize (runGet, runPut)
 import Data.Time (UTCTime, getCurrentTime, addUTCTime)
@@ -141,8 +142,8 @@ requireLoggedIn :: (SafeCopy user, AuthMonad m)
                 => m user
 requireLoggedIn = do
   url <- loginForm <$> getAuthState
-  user <- loginData
-  case user of
+  userM <- loginData
+  case userM of
     Just user -> return user
     Nothing ->
         seeOther url (toResponse "") >>=
@@ -150,16 +151,24 @@ requireLoggedIn = do
 
 -- | If a user is logged in, log them out.
 -- We do not gaurantee this succeeds for a malicious
--- user agent.
-setLoggedOut :: m ()
-setLoggedOut = undefined
+-- user agent - it is provided for user-agent convinience only,
+-- or for a user-agent choosing to lock itself down.
+setLoggedOut :: (AuthMonad m, SafeCopy u) => Proxy u -> m ()
+setLoggedOut p = do
+  userM <- loginData
+  let _ = asProxyTypeOf userM (Just <$> p)
+  case userM of
+    Nothing -> return ()
+    Just{} -> do
+      name <- authCookieName
+      addCookie Expired $ mkCookie name ""
 
 -- | If a user is logged in, refresh their login cookie so they
 -- can stay logged in. Used for keeping a user active when you want
 -- to log them out after X minutes for inactivity.
-refreshLoggedIn :: m ()
-refreshLoggedIn = do
+refreshLoggedIn :: (AuthMonad m, SafeCopy u) => Proxy u -> m ()
+refreshLoggedIn p = do
   userM <- loginData
   case userM of
-    None -> return ()
-    Just user -> setLoggedIn user
+    Nothing -> return ()
+    Just user -> setLoggedIn $ asProxyTypeOf user p
