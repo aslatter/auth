@@ -119,7 +119,7 @@ loginData = do
    do cookie <- eitherToMaybe cookieE 
       bytes <- decrypt key $ B8.pack $ cookieValue cookie
       sessData <- eitherToMaybe $ runGet safeGet bytes
-      guard $ sess_expires sessData < currTime
+      guard $ sess_expires sessData > currTime
       return $ sess_user sessData
 
 -- | Return a redirect to send the user back where they were
