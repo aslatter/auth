@@ -37,7 +37,9 @@ import Data.Typeable (Typeable)
 import Happstack.Server
     ( FilterMonad, ServerMonad, WebMonad, Response, HasRqData, getDataFn,
       lookCookie, addCookie, mkCookie, Cookie(..), CookieLife(..),
-      finishWith, seeOther, toResponse )
+      finishWith, seeOther, toResponse, look, queryString, rqUri, askRq )
+import Network.URL
+    ( URL(..), URLType(..), importURL, exportURL, add_param)
 import Web.ClientSession
 
 -- | Internal type we serialize to the
@@ -59,11 +61,17 @@ data AuthState =
      { loginForm   :: String -- ^ where to redirect to on authentication failure
      , loginSecret :: Maybe Key -- ^ key to use for encryption
      , loginCookieName
-         :: Maybe String -- ^ Name of cookie to store authentication data
+         :: String -- ^ Name of cookie to store authentication data
+     , loginRedirectParam
+         :: Maybe String -- ^ Query param used to store redirect information
      }
 
 defaultAuthState =
-    MkAuthState {loginForm = "/login", loginSecret = Nothing, loginCookieName = Nothing}
+    MkAuthState { loginForm = "/login"
+                , loginSecret = Nothing
+                , loginCookieName = "authData"
+                , loginRedirectParam = Just "loginRedirect"
+                }
 
 -- | Class to make both the 'AuthState' data available and to perform Happstack-server
 -- functions.
@@ -73,7 +81,10 @@ class ( MonadIO m, FilterMonad Response m, ServerMonad m, HasRqData m, Functor m
     getAuthState :: m AuthState
 
 authCookieName :: AuthMonad m => m String
-authCookieName = fromMaybe "authData" . loginCookieName <$> getAuthState
+authCookieName = loginCookieName <$> getAuthState
+
+authRedirectParam :: AuthMonad m => m (Maybe String)
+authRedirectParam = loginRedirectParam <$> getAuthState
 
 newExpires :: AuthMonad m => m UTCTime
 newExpires = do
@@ -130,24 +141,52 @@ loginData = do
 forwardAfterLogin :: (AuthMonad m)
                   => String -- ^ default redirect url
                   -> m Response
--- TODO - make work
-forwardAfterLogin defaultUrl =
-    seeOther defaultUrl (toResponse "")
+forwardAfterLogin defaultUrl = do
+  urlStr <- redirectUrl defaultUrl
+  seeOther urlStr (toResponse ())
+
+redirectUrl :: AuthMonad m => String -> m String
+redirectUrl def = do
+  paramM <- authRedirectParam
+  case paramM of
+    Nothing -> return def
+    Just redirectParam
+        -> do
+      redirectStr <- queryString $ look redirectParam
+      case importURL redirectStr of
+        Just url@(URL {url_type=HostRelative}) ->
+            return $ exportURL url
+        _ -> return $ def
+
+createLoginUrl :: AuthMonad m => m String
+createLoginUrl = do
+  urlStr <- loginForm <$> getAuthState
+  paramM <- authRedirectParam
+  currUrlStr <- rqUri <$> askRq
+  let newUrlM = do
+        redirectParam <- paramM
+        baseUrl <- importURL urlStr
+        currUrl <- importURL currUrlStr
+        let redirectStr =
+                exportURL $ currUrl {url_type = HostRelative}
+        return $ add_param baseUrl (redirectParam, redirectStr)
+  case newUrlM of
+    Nothing -> return urlStr -- do what the user told us if things don't parse
+    Just newUrl -> return $ exportURL newUrl
 
 {-| Return the logged-in user. If a user is not
 logged in, they are forwarded to your login page. 
 -}
--- TODO - add redirect query param.
 requireLoggedIn :: (SafeCopy user, AuthMonad m)
                 => m user
 requireLoggedIn = do
-  url <- loginForm <$> getAuthState
   userM <- loginData
   case userM of
     Just user -> return user
-    Nothing ->
-        seeOther url (toResponse "") >>=
-        finishWith
+    Nothing -> do
+        url <- createLoginUrl
+        seeOther url (toResponse ()) >>=
+          finishWith
 
 -- | If a user is logged in, log them out.
 -- We do not gaurantee this succeeds for a malicious
