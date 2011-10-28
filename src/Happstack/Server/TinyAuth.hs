@@ -1,14 +1,12 @@
-{-# LANGUAGE TemplateHaskell, DeriveDataTypeable, FlexibleContexts #-}
-
+{-# LANGUAGE TemplateHaskell, DeriveDataTypeable, FlexibleContexts, TypeFamilies #-}
 {-| A simple framework for doing forms-based
 authenitcation in Happstack.
 -}
 module Happstack.Server.TinyAuth
     (
     -- * Required state
-      AuthMonad(..)
-    , AuthState(..)
-    , defaultAuthState
+      AuthConfig(..)
+    , defaultAuthConfig
     -- * Key management
     , getKey
     , defaultKeyFile
@@ -21,6 +19,14 @@ module Happstack.Server.TinyAuth
     , requireLoggedIn
     , setLoggedOut
     , refreshLoggedIn
+    -- * Monadic interface
+    ,  AuthMonad(..)
+    , setLoggedIn'
+    , forwardAfterLogin'
+    , loginData'
+    , requireLoggedIn'
+    , setLoggedOut'
+    , refreshLoggedIn'
     ) where
 
 import Control.Monad (guard)
@@ -55,9 +61,9 @@ deriveSafeCopy 1 'base ''SessionInfo
 
 -- | This type is used to customize how authentication
 -- works for your site. We recommend building it from the
--- 'defaultAuthState' value.
-data AuthState =
-    MkAuthState
+-- 'defaultAuthConfig' value.
+data AuthConfig s =
+    MkAuthConfig
      { loginForm   :: String -- ^ where to redirect to on authentication failure
      , loginSecret :: Maybe Key -- ^ key to use for encryption
      , loginCookieName
@@ -66,53 +72,57 @@ data AuthState =
          :: Maybe String -- ^ Query param used to store redirect information
      }
 
-defaultAuthState =
-    MkAuthState { loginForm = "/login"
-                , loginSecret = Nothing
-                , loginCookieName = "authData"
-                , loginRedirectParam = Just "loginRedirect"
-                }
+defaultAuthConfig :: AuthConfig s
+defaultAuthConfig =
+    MkAuthConfig
+     { loginForm = "/login"
+     , loginSecret = Nothing
+     , loginCookieName = "authData"
+     , loginRedirectParam = Just "loginRedirect"
+     }
 
--- | Class to make both the 'AuthState' data available and to perform Happstack-server
+-- | Class to make both the 'AuthConfig' data available and to perform Happstack-server
 -- functions.
 class ( MonadIO m, FilterMonad Response m, ServerMonad m, HasRqData m, Functor m
       , WebMonad Response m)
          => AuthMonad m where
-    getAuthState :: m AuthState
+    type Session m
+    getAuthConfig :: m (AuthConfig (Session m))
 
-authCookieName :: AuthMonad m => m String
-authCookieName = loginCookieName <$> getAuthState
-
-authRedirectParam :: AuthMonad m => m (Maybe String)
-authRedirectParam = loginRedirectParam <$> getAuthState
-
-newExpires :: AuthMonad m => m UTCTime
-newExpires = do
+newExpires :: AuthConfig s -> IO UTCTime
+newExpires _ = do
   curr <- liftIO getCurrentTime
   -- expires in one week
   return $ addUTCTime 604800 curr
 
-getKey' :: AuthMonad m => m Key
-getKey' = do
-  mKey <- loginSecret <$> getAuthState
-  case mKey of
+getKey_ :: AuthConfig s -> IO Key
+getKey_ cfg =
+  case loginSecret cfg of
     Just k -> return k
-    Nothing -> liftIO getDefaultKey
+    Nothing -> getDefaultKey
 
 -- | The passed in user-data is sent to the client
 -- encrypted. Call this in the handler for your login form after
 -- the user has successfully provided credentials.
-setLoggedIn :: (SafeCopy user, AuthMonad m)
-            => user -> m ()
-setLoggedIn user = do
-  cName <- authCookieName
-  expires <- newExpires
+setLoggedIn :: (SafeCopy s, MonadIO m, FilterMonad Response m, Functor m)
+            => AuthConfig s -- ^ Config
+            -> s            -- ^ Session state
+            -> m ()
+setLoggedIn cfg user = do
+  let cName = loginCookieName cfg
+  expires <- liftIO $ newExpires cfg
   let dt = MkSessionInfo user expires
       dtBytes = runPut $ safePut dt
-  key <- getKey'
+  key <- liftIO $ getKey_ cfg
   cData <- B8.unpack <$> (liftIO $ encryptIO key dtBytes)
   let cookie = (mkCookie cName cData) {httpOnly = True}
   addCookie (Expires expires) cookie
+
+-- | Wrapper around `setLoggedIn`.
+setLoggedIn' :: (AuthMonad m, Session m ~ s, SafeCopy s)
+             => s -> m ()
+setLoggedIn' s = getAuthConfig >>= flip setLoggedIn s
+
 
 eitherToMaybe :: Either a b -> Maybe b
 eitherToMaybe Left{}  = Nothing
@@ -120,11 +130,13 @@ eitherToMaybe (Right x) = Just x
 
 -- | If there is a logged in user and the session data
 -- is valid return the session data.
-loginData :: (SafeCopy user, AuthMonad m) => m (Maybe user)
-loginData = do
-  cName <- authCookieName
+loginData :: (SafeCopy s, MonadIO m, HasRqData m, ServerMonad m)
+          => AuthConfig s
+          -> m (Maybe s)
+loginData cfg = do
+  let cName = loginCookieName cfg
   cookieE <- getDataFn $ lookCookie cName
-  key <- getKey'
+  key <- liftIO $ getKey_ cfg
   currTime <- liftIO getCurrentTime
   return $
    do cookie <- eitherToMaybe cookieE 
@@ -133,22 +145,37 @@ loginData = do
       guard $ sess_expires sessData > currTime
       return $ sess_user sessData
 
+-- | Wrapper around `loginData`.
+loginData' :: (AuthMonad m, Session m ~ s, SafeCopy s)
+           => m (Maybe s)
+loginData' = getAuthConfig >>= loginData
+
 -- | Return a redirect to send the user back where they were
 -- trying to go when they were bounced to the login form.
 -- NOTE: You'll lose any post-body data the user was trying
 -- to submit, so try to require login on the form GET as
 -- well as the form POST.
-forwardAfterLogin :: (AuthMonad m)
-                  => String -- ^ default redirect url
+forwardAfterLogin :: (HasRqData m, FilterMonad Response m, Functor m)
+                  => AuthConfig s
+                  -> String -- ^ default redirect url
                   -> m Response
-forwardAfterLogin defaultUrl = do
-  urlStr <- redirectUrl defaultUrl
+forwardAfterLogin cfg defaultUrl = do
+  urlStr <- redirectUrl cfg defaultUrl
   seeOther urlStr (toResponse ())
 
-redirectUrl :: AuthMonad m => String -> m String
-redirectUrl def = do
-  paramM <- authRedirectParam
-  case paramM of
+-- | Wrapper around `forwardAfterLogin`.
+forwardAfterLogin' :: (AuthMonad m)
+                   => String -- ^ default redirect url
+                   -> m Response
+forwardAfterLogin' defaultUrl
+    = getAuthConfig >>= flip forwardAfterLogin defaultUrl
+
+redirectUrl :: (HasRqData m, Monad m, Functor m)
+            => AuthConfig s
+            -> String       -- ^ default redirect location
+            -> m String
+redirectUrl cfg def =
+  case loginRedirectParam cfg of
     Nothing -> return def
     Just redirectParam
         -> do
@@ -158,10 +185,14 @@ redirectUrl def = do
             return $ exportURL url
         _ -> return $ def
 
-createLoginUrl :: AuthMonad m => m String
-createLoginUrl = do
-  urlStr <- loginForm <$> getAuthState
-  paramM <- authRedirectParam
+-- | Pack the current request path into the login
+-- URL provide by the config.
+createLoginUrl :: (HasRqData m, ServerMonad m, Functor m)
+               => AuthConfig s
+               -> m String
+createLoginUrl cfg = do
+  let urlStr = loginForm cfg
+  let paramM = loginRedirectParam cfg
   currUrlStr <- rqUri <$> askRq
   let newUrlM = do
         redirectParam <- paramM
@@ -177,37 +208,55 @@ createLoginUrl = do
 {-| Return the logged-in user. If a user is not
 logged in, they are forwarded to your login page. 
 -}
-requireLoggedIn :: (SafeCopy user, AuthMonad m)
-                => m user
-requireLoggedIn = do
-  userM <- loginData
+requireLoggedIn :: (SafeCopy s, MonadIO m, HasRqData m, ServerMonad m,
+                    WebMonad Response m, FilterMonad Response m, Functor m)
+                => AuthConfig s
+                -> m s
+requireLoggedIn cfg = do
+  userM <- loginData cfg
   case userM of
     Just user -> return user
     Nothing -> do
-        url <- createLoginUrl
+        url <- createLoginUrl cfg
         seeOther url (toResponse ()) >>=
           finishWith
+
+-- | Wrapper around `requireLoggedIn`.
+requireLoggedIn' :: (AuthMonad m, Session m ~ s, SafeCopy s)
+                 => m s
+requireLoggedIn' = getAuthConfig >>= requireLoggedIn
 
 -- | If a user is logged in, log them out.
 -- We do not gaurantee this succeeds for a malicious
 -- user agent - it is provided for user-agent convinience only,
 -- or for a user-agent choosing to lock itself down.
-setLoggedOut :: (AuthMonad m, SafeCopy u) => Proxy u -> m ()
-setLoggedOut p = do
-  userM <- loginData
-  let _ = asProxyTypeOf userM (Just <$> p)
+setLoggedOut :: (SafeCopy s, MonadIO m, FilterMonad Response m, HasRqData m, ServerMonad m)
+             => AuthConfig s -> m ()
+setLoggedOut cfg = do
+  userM <- loginData cfg
   case userM of
     Nothing -> return ()
     Just{} -> do
-      name <- authCookieName
+      let name = loginCookieName cfg
       addCookie Expired $ mkCookie name ""
+
+-- | Wrapper around `setLoggedOut`.
+setLoggedOut' :: (AuthMonad m, Session m ~ s, SafeCopy s)
+              => m ()
+setLoggedOut' = getAuthConfig >>= setLoggedOut
 
 -- | If a user is logged in, refresh their login cookie so they
 -- can stay logged in. Used for keeping a user active when you want
 -- to log them out after X minutes for inactivity.
-refreshLoggedIn :: (AuthMonad m, SafeCopy u) => Proxy u -> m ()
-refreshLoggedIn p = do
-  userM <- loginData
-  case userM of
+refreshLoggedIn :: (SafeCopy s, MonadIO m, FilterMonad Response m, HasRqData m, ServerMonad m, Functor m)
+                => AuthConfig s -> m ()
+refreshLoggedIn cfg = do
+  sessM <- loginData cfg
+  case sessM of
     Nothing -> return ()
-    Just user -> setLoggedIn $ asProxyTypeOf user p
+    Just sess -> setLoggedIn cfg sess
+
+-- | Wrapper around `refreshLoggedIn`.
+refreshLoggedIn' :: (AuthMonad m, Session m ~ s, SafeCopy s)
+                 => m ()
+refreshLoggedIn' = getAuthConfig >>= refreshLoggedIn
