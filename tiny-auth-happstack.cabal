@@ -24,9 +24,9 @@ Library
                        bytestring == 0.9.*,
                        cereal == 0.3.*,
                        clientsession >= 0.7.3.1 && < 0.8,
-                       happstack-server == 6.2.*,
+                       happstack-server == 6.4.*,
                        mtl == 2.0.*,
-                       safecopy == 0.5.*,
+                       safecopy == 0.6.*,
                        tagged == 0.2.*,
                        time == 1.2.*,
                        url == 2.1.*
