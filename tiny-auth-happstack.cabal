@@ -2,7 +2,7 @@
 -- additional options, see
 -- http://www.haskell.org/cabal/release/cabal-latest/doc/users-guide/authors.html#pkg-descr.
 Name:                tiny-auth-happstack
-Version:             0.1
+Version:             0.2.0
 Synopsis:            Helper for dealing with user authentication
 -- Description:         
 Homepage:            https://github.com/aslatter/auth
@@ -28,6 +28,7 @@ Library
                        mtl == 2.0.*,
                        safecopy == 0.6.*,
                        tagged == 0.2.*,
+                       text == 0.11.*,
                        time == 1.4.*,
                        url == 2.1.*
   -- Other-modules:       

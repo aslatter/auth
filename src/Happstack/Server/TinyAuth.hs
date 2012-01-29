@@ -38,6 +38,8 @@ import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy, asProxyTypeOf)
 import Data.SafeCopy (base, deriveSafeCopy, SafeCopy, safePut, safeGet)
 import Data.Serialize (runGet, runPut)
+import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime, addUTCTime)
 import Data.Typeable (Typeable)
 import Happstack.Server
@@ -64,7 +66,7 @@ deriveSafeCopy 1 'base ''SessionInfo
 -- 'defaultAuthConfig' value.
 data AuthConfig s =
     MkAuthConfig
-     { loginForm   :: String -- ^ where to redirect to on authentication failure
+     { loginForm   :: Text -- ^ where to redirect to on authentication failure
      , loginSecret :: Maybe Key -- ^ key to use for encryption
      , loginCookieName
          :: String -- ^ Name of cookie to store authentication data
@@ -75,7 +77,7 @@ data AuthConfig s =
 defaultAuthConfig :: AuthConfig s
 defaultAuthConfig =
     MkAuthConfig
-     { loginForm = "/login"
+     { loginForm = T.pack "/login"
      , loginSecret = Nothing
      , loginCookieName = "authData"
      , loginRedirectParam = Just "loginRedirect"
@@ -191,7 +193,7 @@ createLoginUrl :: (HasRqData m, ServerMonad m, Functor m)
                => AuthConfig s
                -> m String
 createLoginUrl cfg = do
-  let urlStr = loginForm cfg
+  let urlStr = T.unpack $ loginForm cfg
   let paramM = loginRedirectParam cfg
   currUrlStr <- rqUri <$> askRq
   let newUrlM = do
